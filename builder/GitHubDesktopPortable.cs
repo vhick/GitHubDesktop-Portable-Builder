@@ -94,8 +94,29 @@ internal static class GitHubDesktopPortable
                 return key == null ? "" : (key.GetValue("") as string ?? "");
         }
 
-        // Called after Desktop has registered itself on the Electron ready event.
-        public bool IsAppRegistered(string appExe)
+        // Wait until ALL protocols are registered. GitHub Desktop registers
+        // them sequentially on app.ready. Reacting to the FIRST one lets
+        // Electron overwrite our portable handler with the remaining keys.
+        public bool AreAllAppHandlersRegistered(string appExe)
+        {
+            foreach (string scheme in Schemes)
+                if (GetCommand(scheme).IndexOf(appExe, StringComparison.OrdinalIgnoreCase) < 0)
+                    return false;
+            return true;
+        }
+
+        public bool AllPointToLauncher()
+        {
+            foreach (string scheme in Schemes)
+                if (!String.Equals(GetCommand(scheme), desiredCommand,
+                                   StringComparison.OrdinalIgnoreCase))
+                    return false;
+            return true;
+        }
+
+        // Reclaim only registrations written by this same bundled app.
+        // Never override a different application that took ownership later.
+        public bool AnyPointToInnerExe(string appExe)
         {
             foreach (string scheme in Schemes)
                 if (GetCommand(scheme).IndexOf(appExe, StringComparison.OrdinalIgnoreCase) >= 0)
@@ -115,7 +136,7 @@ internal static class GitHubDesktopPortable
                 using (RegistryKey key = Registry.CurrentUser.CreateSubKey(
                     RegistryBase + scheme + @"\shell\open\command"))
                     key.SetValue("", desiredCommand, RegistryValueKind.String);
-                claimed.Add(scheme);
+                if (!claimed.Contains(scheme)) claimed.Add(scheme);
             }
             SHChangeNotify(SHCNE_ASSOCCHANGED, 0, IntPtr.Zero, IntPtr.Zero);
         }
@@ -260,7 +281,7 @@ internal static class GitHubDesktopPortable
                 bool observed = false;
                 while (watch.ElapsedMilliseconds < 20000 && !child.HasExited)
                 {
-                    if (protocols.IsAppRegistered(exe)) { observed = true; break; }
+                    if (protocols.AreAllAppHandlersRegistered(exe)) { observed = true; break; }
                     Thread.Sleep(250);
                 }
                 if (!observed)
@@ -273,8 +294,21 @@ internal static class GitHubDesktopPortable
                         "browser sign-in handler within 20 seconds. Portable login cannot be guaranteed.");
                 }
                 protocols.Claim();
+                if (!protocols.AllPointToLauncher())
+                    throw new InvalidOperationException("Portable browser-login registration " +
+                        "did not take effect. The app will not continue with nonportable sign-in.");
             }
-            child.WaitForExit();
+            // Some Desktop builds can replace their URL handlers again.
+            // While the first portable instance is running, restore ONLY
+            // handlers switched back to THIS bundled inner application.
+            // Unlike a one-time Claim(), this catches later app registrations.
+            while (!child.WaitForExit(250))
+            {
+                if (!callback && protocols != null && protocols.AnyPointToInnerExe(exe))
+                {
+                    protocols.Claim();
+                }
+            }
             return child.ExitCode;
         }
         catch (Exception ex)

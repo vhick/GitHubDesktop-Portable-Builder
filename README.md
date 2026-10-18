@@ -1,68 +1,44 @@
-# GitHub Desktop Portable — OAuth/Browser Login Fix (Windows)
+# GitHub Desktop Portable — Browser Callback Registration Fix
 
-**Status: Candidate fix, not a Windows-verified portable release.** This updates the previously successful ZIP builder without replacing your GitHub Desktop application itself. It addresses the missing browser-login handling in the first community launcher.
+This kit is a **revision of the previous OAuth-portable builder**, based on the read-only diagnostic captured October 18, 2026. **The full Windows authentication test has not yet passed.**
 
-## What failed and why
+## Why this change exists
 
-When the browser finishes the GitHub OAuth flow, Windows opens a special `x-github-desktop-auth://` URL. The original GitHub Desktop app automatically registers `App\GitHubDesktop\GitHubDesktop.exe` as its handler. Launching that inner EXE directly **does not inherit the portable environment settings**, so it may create `%APPDATA%\GitHub Desktop` and cause duplicate login windows. This behavior is documented in GitHub Desktop's own source and issues.
+The diagnostic showed:
+- Primary `GitHubDesktop.exe` was started with `--user-data-dir` by the portable launcher.
+- Browser callback started a second main `GitHubDesktop.exe` *without* that argument.
+- All three URL handlers (`x-github-desktop-auth`, `x-github-client`, and `github-windows`) were pointing at the inner executable, not the launcher.
+- Normal `%APPDATA%\GitHub Desktop` had recent writes.
 
-The corrected portable launcher:
+A concrete defect was found in `TemporaryProtocols.IsAppRegistered`: it returned true as soon as **any one** of the three schemes was registered. GitHub Desktop registers schemes in sequence. This can let our launcher claim too early and have its entry overwritten.
 
-1. Starts the official `GitHubDesktop.exe` using process-local `APPDATA`, `LOCALAPPDATA`, `HOME`, caches, Git config, and temporary paths under `Data`.
-2. Waits for the application to register its Windows browser handlers, then temporarily registers the **root `GitHubDesktopPortable.exe`** for `x-github-desktop-auth`, `x-github-client`, and `github-windows`.
-3. When the browser sends its callback, launches the application **with the same portable environment and `--protocol-launcher` arguments** so Electron can forward authentication to the running instance.
-4. After normal application exit, attempts to restore the earlier `HKCU\Software\Classes` protocol registrations, rather than leaving ours permanently installed.
+## Changes
 
-### Important limitations
+1. Wait for **all three** handlers to be registered before taking over.
+2. Immediately verify that all three handlers now target the portable launcher.
+3. While the portable app is open, check periodically whether **this bundled inner executable** took its handler back, and reclaim those handlers (without overriding a different app).
+4. Preserve the existing temporary-registry backup and restore mechanism. Existing `App`, `Data`, and `Other` packaging remains unchanged.
+5. Retain private callback checks; do **not** log OAuth URLs or tokens.
 
-- This **temporarily modifies Windows per-user registry associations**. It is **not** a zero-registry-write application. An abrupt Windows shutdown, forced termination, or simultaneous installed GitHub Desktop session can leave a stale registration or conflict. Do not claim forensic zero-remnant portability.
-- Windows itself may retain launch history. Some GitHub credential mechanisms and third-party tools may write outside `Data`.
-- Do not run as administrator. Close any regular installed GitHub Desktop and all other portable GitHub Desktop copies before testing.
-- Never launch `App\GitHubDesktop\GitHubDesktop.exe` directly; it will bypass the portable launcher.
-- Automatic self-updates remain unsupported and could cause non-portable writes. Update using a fresh **manual GitHub Actions ZIP**, replacing only `App` and the root launcher and preserving your existing `Data`.
-- We have not exercised this build on Windows; the browser sign-in and registry restore **still require real-world verification**.
+## How to update your existing builder
 
-## Easiest update to your existing GitHub builder
+Only **one application-builder file** needs to be replaced:
 
-The complete builder ZIP has the same file structure as the previous GitHubDesktop-Portable-Builder-Corrected.zip. **To apply just this fix:**
+1. Extract the ZIP.
+2. Go to your GitHub repository `GitHubDesktop-Portable-Builder` -> `builder`.
+3. Replace `GitHubDesktopPortable.cs` with `builder/GitHubDesktopPortable.cs` from this ZIP. Commit to `main`.
+4. Go to Actions -> Build GitHub Desktop Portable ZIP (Manual) -> **Run workflow**. Start a **NEW** run, not re-run of an old commit.
+5. Extract the newly created ZIP artifact. Close all GitHub Desktop instances, back up your existing `Data`, and **replace `App` and `GitHubDesktopPortable.exe` while keeping your existing `Data` folder**.
+6. Launch `GitHubDesktopPortable.exe` **normally**, never elevated, and try one browser sign-in. Stop if a second GitHub Desktop window appears.
 
-1. Extract the `GitHubDesktop-OAuth-One-File-Fix.zip` from the downloads.
-2. In your GitHubDesktop-Portable-Builder repository, open the `builder` folder.
-3. Replace `builder/GitHubDesktopPortable.cs` with the new file.
-4. Commit the change to branch `main`.
-5. Open **Actions → Build GitHub Desktop Portable ZIP (Manual) → Run workflow**. Start a **NEW** run using `release_version: 3.6.7`, `architecture: x64`. Do not use Re-run on an old failed or successful run, because GitHub re-runs use the old commit.
-6. Download the new Actions artifact, extract both ZIP files into a *separate* temporary folder.
-7. Close any running GitHub Desktop processes. Back up your current `GitHubDesktopPortable/Data` folder before updating.
-8. In the *existing* portable installation, replace the **entire `App` folder** and **`GitHubDesktopPortable.exe`**, but keep the existing `Data` folder untouched. (You may update `Other` too.)
-9. Run **only the root `GitHubDesktopPortable.exe`** as a normal Windows user, without Run as administrator.
+All other files (including the working build workflow) are carried in the full kit only for reference. Replacing the one C# file is sufficient.
 
-## First authentication test
+## Verification / privacy
 
-1. Close any previously opened GitHub Desktop. Make sure only your new portable copy will be running.
-2. Do not delete any `%APPDATA%\GitHub Desktop` folder yet. It might contain account data from the earlier failed test or from an installed version.
-3. Launch `GitHubDesktopPortable.exe`. Wait until the sign-in page appears.
-4. Click Sign in and approve once in the browser. The login link should route through the root portable launcher, not the inner EXE.
-5. Confirm GitHub Desktop actually displays your GitHub account in Options → Accounts.
-6. Change a theme or preference, close the app fully, and relaunch. Check the preference persists.
-7. Verify settings and logs are being updated under `GitHubDesktopPortable\Data\Roaming\GitHub Desktop`. A newly created `%APPDATA%\GitHub Desktop` folder or another login loop means this version still is not fully portable: stop using it and share diagnostic information **without sharing the actual OAuth callback URL, tokens, or credentials**.
-8. After a normal app exit, the temporary browser URL handler should be restored to its previous state. If Windows was interrupted, the association may require manual repair; see Windows Settings > Apps > Default apps or the official GitHub Desktop installer.
+These are offline static/unit checks, not proof of Windows behavior. GitHub Desktop and Windows can change protocol associations. Do not delete your host `%APPDATA%\GitHub Desktop` folder yet; it can contain settings from previous tests. Back it up before later cleanup. Credentials stored using Windows protection may require re-login after a Windows reinstall.
 
-## Included files
+If this still produces a second main process, do not keep trying login or running more registry-repair variants. The next approach would need a code-level patch to GitHub Desktop's protocol registration / single-instance behavior rather than merely its external launcher.
 
-- `.github/workflows/build-github-desktop-portable.yml` — existing manual ZIP workflow; unchanged.
-- `builder/GitHubDesktopPortable.cs` — **updated**, carries login callback through portable environment and temporary registry integration.
-- `builder/build_windows.ps1` — existing corrected C# compilation path; unchanged.
-- `builder/build_portable.py`, `builder/verify_zip.py` — existing pinned-release packaging and archive checks; unchanged.
-- `tests/test_builder.py` — two additional **static checks** for OAuth routing and restoration logic.
-- `README.md`, `START-HERE.txt` — revised instructions.
-
-Offline tests pass but **cannot validate the Windows login flow or registry cleanup**. Real Windows verification is required.
-
-## References
-
-- https://github.com/desktop/desktop/issues/22325 — official issue explaining `x-github-desktop-auth://` redirects and single-instance handoff.
-- https://github.com/desktop/desktop/blob/development/app/src/main-process/main.ts — main-process protocol registrations.
-- https://www.electronjs.org/docs/latest/tutorial/launch-app-from-url-in-another-app — Electron custom protocol behavior.
-- https://github.com/desktop/desktop/blob/development/docs/installation.md — Windows user-data directories.
-
-Community repack, not endorsed by GitHub. Respect the upstream software license and trademark restrictions.
+Sources:
+- https://github.com/desktop/desktop/blob/development/app/src/main-process/main.ts
+- https://www.electronjs.org/docs/latest/api/app
