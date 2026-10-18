@@ -19,8 +19,16 @@ try {
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework/v4.0.30319/csc.exe'
 if (-not (Test-Path $compiler)) { throw 'Windows .NET Framework C# compiler missing' }
 $launcher = Join-Path $root 'GitHubDesktopPortable.exe'
-& $compiler /nologo /target:winexe "/out:$launcher" "/win32icon:$icon" /reference:System.Windows.Forms.dll 'builder/GitHubDesktopPortable.cs'
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path $launcher)) { throw 'Portable launcher compilation failed' }
+# Always refer to the C# source relative to THIS script, not the shell's current folder.
+# Supplying an absolute path prevents CSC from looking in the repository root.
+$launcherSource = Join-Path $PSScriptRoot 'GitHubDesktopPortable.cs'
+if (-not (Test-Path -LiteralPath $launcherSource -PathType Leaf)) {
+  throw "Missing portable launcher C# source: $launcherSource"
+}
+$launcherSource = (Resolve-Path -LiteralPath $launcherSource).Path
+Write-Host "Compiling portable launcher from: $launcherSource"
+& $compiler /nologo /target:winexe "/out:$launcher" "/win32icon:$icon" /reference:System.Windows.Forms.dll $launcherSource
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw 'Portable launcher compilation failed' }
 $appInfo = @"
 [Format]
 Type=PortableApps.comFormat
