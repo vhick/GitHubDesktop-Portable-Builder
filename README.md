@@ -1,115 +1,68 @@
-# GitHub Desktop Portable Builder — Windows (Community Edition)
+# GitHub Desktop Portable — OAuth/Browser Login Fix (Windows)
 
-**This is a build kit, not the application itself.** Use a standalone GitHub repository and the manual GitHub Actions workflow to create a portable ZIP.
+**Status: Candidate fix, not a Windows-verified portable release.** This updates the previously successful ZIP builder without replacing your GitHub Desktop application itself. It addresses the missing browser-login handling in the first community launcher.
 
-**Initial target:** GitHub Desktop **3.6.7**, the latest confirmed official stable release as of October 18, 2026. **Windows x64** is recommended. ARM64 is only an option when the official release actually provides a Windows ARM64 full `.nupkg` (the 3.6.7 release currently lists x64, not ARM64).
+## What failed and why
 
-## What this builder actually does
+When the browser finishes the GitHub OAuth flow, Windows opens a special `x-github-desktop-auth://` URL. The original GitHub Desktop app automatically registers `App\GitHubDesktop\GitHubDesktop.exe` as its handler. Launching that inner EXE directly **does not inherit the portable environment settings**, so it may create `%APPDATA%\GitHub Desktop` and cause duplicate login windows. This behavior is documented in GitHub Desktop's own source and issues.
 
-- Downloads the official published stable Windows **full `.nupkg`** from `desktop/desktop` on GitHub Releases. It does *not* need to install GitHub Desktop or compile the huge Electron project from source.
-- Accepts **only** the exact stable `release-X.Y.Z` GitHub release tag and expected x64/arm64 `full.nupkg` asset. Rejects previews/betas.
-- Verifies the package's SHA-256 checksum against the digest published by the official GitHub Releases API. Version 3.6.7 x64 is also pinned to the verified official SHA-256 (`9790523c...ca9a3`) so a missing API digest does not break the initial build. For other releases a missing digest causes a **safe failure** instead of downloading unverified bytes.
-- Extracts the official app program files directly from `lib/net45/` without invoking a Windows installer.
-- Compiles a small `GitHubDesktopPortable.exe` using the Windows .NET Framework C# compiler. Extracts the **authentic official icon** from the downloaded GitHub Desktop executable.
-- Creates an `App / Data / Other / GitHubDesktopPortable.exe` layout. Sets process-local environment paths to keep main app settings, caches and Git configuration in `Data`, without permanently setting Windows environment variables.
-- Ships upstream licensing and version metadata. Keeps builds manual, without an automatic sync or PAF workflow.
+The corrected portable launcher:
 
-## 1. Create the repository (one-time setup)
+1. Starts the official `GitHubDesktop.exe` using process-local `APPDATA`, `LOCALAPPDATA`, `HOME`, caches, Git config, and temporary paths under `Data`.
+2. Waits for the application to register its Windows browser handlers, then temporarily registers the **root `GitHubDesktopPortable.exe`** for `x-github-desktop-auth`, `x-github-client`, and `github-windows`.
+3. When the browser sends its callback, launches the application **with the same portable environment and `--protocol-launcher` arguments** so Electron can forward authentication to the running instance.
+4. After normal application exit, attempts to restore the earlier `HKCU\Software\Classes` protocol registrations, rather than leaving ours permanently installed.
 
-1. Open https://github.com/new .
-2. Repository name: **`GitHubDesktop-Portable-Builder`**.
-3. Choose **Public** and leave **Add a README**, **.gitignore**, and **License** set to None/off.
-4. Click **Create repository**.
+### Important limitations
 
-## 2. Add the build kit
+- This **temporarily modifies Windows per-user registry associations**. It is **not** a zero-registry-write application. An abrupt Windows shutdown, forced termination, or simultaneous installed GitHub Desktop session can leave a stale registration or conflict. Do not claim forensic zero-remnant portability.
+- Windows itself may retain launch history. Some GitHub credential mechanisms and third-party tools may write outside `Data`.
+- Do not run as administrator. Close any regular installed GitHub Desktop and all other portable GitHub Desktop copies before testing.
+- Never launch `App\GitHubDesktop\GitHubDesktop.exe` directly; it will bypass the portable launcher.
+- Automatic self-updates remain unsupported and could cause non-portable writes. Update using a fresh **manual GitHub Actions ZIP**, replacing only `App` and the root launcher and preserving your existing `Data`.
+- We have not exercised this build on Windows; the browser sign-in and registry restore **still require real-world verification**.
 
-1. Download the builder ZIP that came with these instructions, and **Extract All**.
-2. Upload these extracted items to the new GitHub repo and commit changes: `builder`, `tests`, `README.md`, `START-HERE.txt`. **Do not upload the ZIP itself.**
-3. If you cannot upload `.github` (Windows sometimes hides dot folders), first create a file from the GitHub website using **Add file → Create new file** and this exact file name: `.github/workflows/README.md` . Put `Workflow folder` in its body and commit.
-4. On GitHub open `.github` → `workflows` and upload the **individual** `build-github-desktop-portable.yml` file from the extracted ZIP's `.github/workflows`. Commit it.
+## Easiest update to your existing GitHub builder
 
-## 3. Build your portable ZIP
+The complete builder ZIP has the same file structure as the previous GitHubDesktop-Portable-Builder-Corrected.zip. **To apply just this fix:**
 
-1. Open **Actions** in the builder repository. Enable Actions if GitHub asks for your approval.
-2. Select **Build GitHub Desktop Portable ZIP (Manual)**, then click **Run workflow**.
-3. Use branch `main`, `release_version: 3.6.7`, `architecture: x64`.
-4. Click **Run workflow** again to start the build.
-5. After the run finishes successfully (green check mark), open **Artifacts** and download `GitHubDesktopPortable-3.6.7-x64`.
-6. Extract that GitHub artifact ZIP, then extract the enclosed `GitHubDesktop-v3.6.7-x64-Portable.zip`.
-7. Open the `GitHubDesktopPortable` folder and **only run the root `GitHubDesktopPortable.exe`**. The inner `App/GitHubDesktop/GitHubDesktop.exe` bypasses our portable-data redirection.
+1. Extract the `GitHubDesktop-OAuth-One-File-Fix.zip` from the downloads.
+2. In your GitHubDesktop-Portable-Builder repository, open the `builder` folder.
+3. Replace `builder/GitHubDesktopPortable.cs` with the new file.
+4. Commit the change to branch `main`.
+5. Open **Actions → Build GitHub Desktop Portable ZIP (Manual) → Run workflow**. Start a **NEW** run using `release_version: 3.6.7`, `architecture: x64`. Do not use Re-run on an old failed or successful run, because GitHub re-runs use the old commit.
+6. Download the new Actions artifact, extract both ZIP files into a *separate* temporary folder.
+7. Close any running GitHub Desktop processes. Back up your current `GitHubDesktopPortable/Data` folder before updating.
+8. In the *existing* portable installation, replace the **entire `App` folder** and **`GitHubDesktopPortable.exe`**, but keep the existing `Data` folder untouched. (You may update `Other` too.)
+9. Run **only the root `GitHubDesktopPortable.exe`** as a normal Windows user, without Run as administrator.
 
-The builder can fail if the upstream assets have been renamed, the published GitHub release has no SHA-256 digest, or Windows compilation/packaging requirements change. In that case do not disable verification; check the failed job step.
+## First authentication test
 
-## Expected structure
+1. Close any previously opened GitHub Desktop. Make sure only your new portable copy will be running.
+2. Do not delete any `%APPDATA%\GitHub Desktop` folder yet. It might contain account data from the earlier failed test or from an installed version.
+3. Launch `GitHubDesktopPortable.exe`. Wait until the sign-in page appears.
+4. Click Sign in and approve once in the browser. The login link should route through the root portable launcher, not the inner EXE.
+5. Confirm GitHub Desktop actually displays your GitHub account in Options → Accounts.
+6. Change a theme or preference, close the app fully, and relaunch. Check the preference persists.
+7. Verify settings and logs are being updated under `GitHubDesktopPortable\Data\Roaming\GitHub Desktop`. A newly created `%APPDATA%\GitHub Desktop` folder or another login loop means this version still is not fully portable: stop using it and share diagnostic information **without sharing the actual OAuth callback URL, tokens, or credentials**.
+8. After a normal app exit, the temporary browser URL handler should be restored to its previous state. If Windows was interrupted, the association may require manual repair; see Windows Settings > Apps > Default apps or the official GitHub Desktop installer.
 
-```text
-GitHubDesktopPortable/
-  GitHubDesktopPortable.exe    <-- only start here
-  App/
-    GitHubDesktop/
-      GitHubDesktop.exe
-      resources/
-      ...bundled application and Git...
-    AppInfo/
-      appinfo.ini
-      appicon.ico              <-- extracted from the OFFICIAL Windows EXE
-  Data/                        <-- preserve during ALL updates
-    README.txt
-    Roaming/GitHub Desktop/     <-- main app preferences, databases and logs, created at first run
-    Local/                     <-- isolated Windows-local app data, created at first run
-    Git/config                 <-- optional portable Git configuration
-    Home/                      <-- home for Git child processes
-    Repositories/              <-- optional location to clone your repos
-    Cache/
-    Temp/
-  Other/Source/
-    LICENSE.txt
-    build-info.txt
-```
+## Included files
 
-The ZIP includes empty Data subfolders at first. On subsequent launches `Data` accumulates settings, logs and history. The original ZIP **does not contain any existing user data**, so do not copy its empty `Data` over a populated `Data` during upgrades.
+- `.github/workflows/build-github-desktop-portable.yml` — existing manual ZIP workflow; unchanged.
+- `builder/GitHubDesktopPortable.cs` — **updated**, carries login callback through portable environment and temporary registry integration.
+- `builder/build_windows.ps1` — existing corrected C# compilation path; unchanged.
+- `builder/build_portable.py`, `builder/verify_zip.py` — existing pinned-release packaging and archive checks; unchanged.
+- `tests/test_builder.py` — two additional **static checks** for OAuth routing and restoration logic.
+- `README.md`, `START-HERE.txt` — revised instructions.
 
-## 4. How to preserve settings when updating
+Offline tests pass but **cannot validate the Windows login flow or registry cleanup**. Real Windows verification is required.
 
-1. **Close GitHub Desktop completely.** Verify it is not running in the Windows Task Manager.
-2. Back up your entire `GitHubDesktopPortable/Data` folder. Also back up repositories located elsewhere (they are separate from application settings).
-3. Run the **manual builder** for the new official stable release version (only if the builder passes compatibility and checksum verification).
-4. Extract the new archive **to a different temporary folder**.
-5. In your existing GitHubDesktopPortable folder, delete the **old `App` folder only**.
-6. Copy over the **new `App` folder and `GitHubDesktopPortable.exe`**. You may update `Other` too.
-7. **Keep the existing `Data` folder untouched**. Never replace it with the new build's empty Data directory.
-8. Launch using `GitHubDesktopPortable.exe` and check settings, repo list, Git configuration and push/pull.
+## References
 
-**Important:** GitHub Desktop can advertise or initiate its own **Squirrel auto-updates**. Do **not** use any in-app update-and-restart action for this repack: it can create another installation tree under `Data/Local/GitHubDesktop`. Instead use the manual builder update steps above. This builder does not patch or disable the original updater.
+- https://github.com/desktop/desktop/issues/22325 — official issue explaining `x-github-desktop-auth://` redirects and single-instance handoff.
+- https://github.com/desktop/desktop/blob/development/app/src/main-process/main.ts — main-process protocol registrations.
+- https://www.electronjs.org/docs/latest/tutorial/launch-app-from-url-in-another-app — Electron custom protocol behavior.
+- https://github.com/desktop/desktop/blob/development/docs/installation.md — Windows user-data directories.
 
-## 5. After formatting or reinstalling Windows
-
-1. Keep your full `GitHubDesktopPortable` folder on a separate drive or restore it from a backup.
-2. Restore your repository folders as well (prefer `Data/Repositories` if you want everything stored together).
-3. Run `GitHubDesktopPortable.exe` and sign in to GitHub again. Windows/DPAPI credentials or system browser protocol registration may not survive a reinstall.
-4. Verify Git author name/email and re-select any external editor or tool paths that changed.
-5. If GitHub Desktop's repo list points to a previous drive letter, use **File → Add local repository** to reconnect without recloning.
-
-## 6. Limitations — read before claiming full portability
-
-The launcher sets a process-local `APPDATA`, `LOCALAPPDATA`, `HOME`, `GIT_CONFIG_GLOBAL`, `TEMP`, and `XDG` paths. That should redirect the usual application settings and logs; however, **GitHub Desktop has no official portable mode**. On Windows, GitHub Desktop also registers web-browser authentication handlers and can use Windows-specific credential stores and system paths. We deliberately do not overwrite `USERPROFILE` to avoid breaking Windows identity and sign-in.
-
-**Do not assume perfect isolation until Windows testing passes.** Some background Git or browser processes might still use real home folders; built-in updating is not made portable. The official app may register `x-github-desktop-auth`, `x-github-client`, or similar protocol handlers in the Windows registry. We have not modified these behaviors. Browser sign-in may launch the inner executable once and create host-local remnants. This is an honest **same-computer data-preserving portable candidate**, *not yet a verified true-portable build*.
-
-We recommend a before-and-after audit on Windows:
-
-1. Before first launch note contents of `%APPDATA%\GitHub Desktop`, `%LOCALAPPDATA%\GitHubDesktop`, `%USERPROFILE%\.gitconfig`, and relevant `HKCU\Software\Classes\x-github-desktop-auth` keys.
-2. Launch the portable EXE, adjust theme and settings, add a local repository, close, reopen. Confirm `Data/Roaming/GitHub Desktop` grows and settings persist.
-3. Test browser login, clone, commit, push, fetch and pull. Confirm `Data/Git/config` receives Git author settings if you edit them in the app.
-4. Compare Windows AppData folders and registry before and after; repeat after closing. Login callback and Windows-managed records are expected candidates for host changes.
-5. Test a manual `App` upgrade while **preserving Data**. Check whether repository list and preferences remain available.
-6. Back up everything before changing Windows or testing upgrade behavior.
-
-### Licensing and source
-
-- Official application: https://github.com/desktop/desktop
-- Official releases: https://github.com/desktop/desktop/releases
-- Official Windows data locations: https://github.com/desktop/desktop/blob/development/docs/installation.md
-- Original application copyright belongs to GitHub and its contributors. The official MIT license includes a separate trademark reservation for GitHub's icons/logos. This is an unofficial community packaging experiment, not endorsed by GitHub.
-
-**Verification status:** Offline Python tests passed, and builder kit ZIP contents were checked. The Windows GitHub Actions run, launcher behavior, real settings preservation and authentication have **NOT** been executed or verified yet.
+Community repack, not endorsed by GitHub. Respect the upstream software license and trademark restrictions.
