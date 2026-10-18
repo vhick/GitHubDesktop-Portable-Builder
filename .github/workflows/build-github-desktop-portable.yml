@@ -1,0 +1,60 @@
+name: Build GitHub Desktop Portable ZIP (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Official stable release, e.g. 3.6.7'
+        required: true
+        default: '3.6.7'
+        type: string
+      architecture:
+        description: 'Windows CPU architecture'
+        required: true
+        default: 'x64'
+        type: choice
+        options:
+          - x64
+          - arm64
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-desktop-portable-manual
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout builder
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Run offline builder tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -v
+
+      - name: Package official GitHub Desktop Windows release
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          TARGET_ARCH: ${{ inputs.architecture }}
+        run: |
+          & ./builder/build_windows.ps1 -Version $env:RELEASE_VERSION -Architecture $env:TARGET_ARCH
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+
+      - name: Upload portable ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GitHubDesktopPortable-${{ inputs.release_version }}-${{ inputs.architecture }}
+          path: artifacts/*.zip
+          if-no-files-found: error
+          retention-days: 7
